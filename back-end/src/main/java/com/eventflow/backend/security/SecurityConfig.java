@@ -1,0 +1,120 @@
+package com.eventflow.backend.security;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.Arrays;
+import java.util.List;
+
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity
+public class SecurityConfig {
+
+    private final JwtAuthFilter jwtAuthFilter;
+    private final ApiSecurityResponseWriter responseWriter;
+
+    @Value("${eventflow.security.cors.allowed-origins:http://localhost,http://127.0.0.1,http://localhost:5173,http://127.0.0.1:5173}")
+    private String allowedOrigins;
+
+    @Value("${eventflow.security.cors.allowed-origin-patterns:https://*.ngrok-free.app,https://*.ngrok.app}")
+    private String allowedOriginPatterns;
+
+    @Value("${eventflow.security.public-ops-endpoints:true}")
+    private boolean publicOpsEndpoints;
+
+    public SecurityConfig(JwtAuthFilter jwtAuthFilter, ApiSecurityResponseWriter responseWriter) {
+        this.jwtAuthFilter = jwtAuthFilter;
+        this.responseWriter = responseWriter;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .csrf(AbstractHttpConfigurer::disable)
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .exceptionHandling(exceptions -> exceptions
+                        .authenticationEntryPoint((request, response, authException) ->
+                                responseWriter.writeError(request, response, HttpStatus.UNAUTHORIZED, "Bạn cần đăng nhập để thực hiện thao tác này"))
+                        .accessDeniedHandler((request, response, accessDeniedException) ->
+                                responseWriter.writeError(request, response, HttpStatus.FORBIDDEN, "Bạn không có quyền thực hiện thao tác này")))
+                .authorizeHttpRequests(auth -> {
+                    auth
+                            .requestMatchers("/api/auth/**").permitAll()
+                            .requestMatchers("/api/v1/auth/**").permitAll()
+                            .requestMatchers("/api/event-invitations/confirm").permitAll()
+                            .requestMatchers("/api/v1/event-invitations/confirm").permitAll()
+                            .requestMatchers("/api/subscriptions/plans").permitAll()
+                            .requestMatchers("/api/v1/subscriptions/plans").permitAll()
+                            .requestMatchers("/api/subscriptions/payments/payos/**").permitAll()
+                            .requestMatchers("/api/v1/subscriptions/payments/payos/**").permitAll()
+                            .requestMatchers("/api/webhooks/**").permitAll()
+                            .requestMatchers("/api/telegram/webhook/**").permitAll();
+                    if (publicOpsEndpoints) {
+                        auth
+                                .requestMatchers("/api-docs/**", "/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**").permitAll()
+                                .requestMatchers("/actuator/**").permitAll();
+                    }
+                    auth.anyRequest().authenticated();
+                })
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+
+        configuration.setAllowedOrigins(parseCsv(allowedOrigins));
+        configuration.setAllowedOriginPatterns(parseCsv(allowedOriginPatterns));
+
+        configuration.setAllowedMethods(List.of(
+                "GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
+
+        configuration.setAllowedHeaders(List.of("*"));
+        configuration.setExposedHeaders(List.of(
+                "Authorization",
+                "Retry-After",
+                "X-RateLimit-Limit",
+                "X-RateLimit-Remaining",
+                "X-RateLimit-Window-Seconds",
+                "X-Request-Id"));
+        configuration.setAllowCredentials(true);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+
+        return source;
+    }
+
+    private List<String> parseCsv(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(item -> !item.isBlank())
+                .toList();
+    }
+}
